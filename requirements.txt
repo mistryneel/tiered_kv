@@ -1,0 +1,27 @@
+# Pin transformers in the late-2024 stable Cache-API window.
+# 4.45-4.49 has DynamicCache/QuantizedCache settled but pre-dates the
+# CacheLayerMixin refactor that lands in 4.50+.
+transformers>=4.45,<4.50
+torch>=2.3,<3.0
+accelerate>=0.30
+safetensors>=0.4
+sentencepiece>=0.2
+tokenizers>=0.19
+
+# Datasets and eval
+datasets>=2.18
+huggingface_hub>=0.23
+
+# Plotting + analysis
+matplotlib>=3.8
+seaborn>=0.13
+pandas>=2.2
+numpy>=1.26
+
+# Notebook runtime
+ipykernel>=6.29
+ipywidgets>=8.1
+jupyterlab>=4.2
+
+# Memory profiling helpers (optional but cheap)
+psutil>=5.9

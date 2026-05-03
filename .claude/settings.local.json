@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(/Users/mistrynpk/den/__PYCHARM/tiered_kv/.venv/bin/python -c \"import torch; print\\('torch', torch.__version__\\)\")"
+    ]
+  }
+}
