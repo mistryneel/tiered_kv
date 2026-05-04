@@ -1,0 +1,8 @@
+{
+  "source_run": "autoresearch/tuning/local_1777797085",
+  "trial_idx": 123,
+  "score": 2.0888103893767167,
+  "best_quantized_strategy": "Hybrid",
+  "best_memory_ratio": 0.3117523193359375,
+  "ready_strategy_count": 3
+}

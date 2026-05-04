@@ -25,3 +25,6 @@ jupyterlab>=4.2
 
 # Memory profiling helpers (optional but cheap)
 psutil>=5.9
+
+# Local correctness checks
+pytest>=8.0

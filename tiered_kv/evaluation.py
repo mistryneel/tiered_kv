@@ -41,6 +41,10 @@ import torch
 # module loads on a torch-only environment for unit tests.
 
 
+def _is_cuda_device(device: str) -> bool:
+    return str(device).startswith("cuda") and torch.cuda.is_available()
+
+
 # ----------------------------------------------------------------------------
 # 1. Synthetic key→value recall.
 # ----------------------------------------------------------------------------
@@ -363,6 +367,46 @@ def kv_bytes_theoretical(
     return int(2 * num_layers * num_kv_heads * head_dim * seq_len * bytes_per_elem)
 
 
+def _tensor_storage_bytes(x: Any) -> int:
+    if torch.is_tensor(x):
+        return x.element_size() * x.numel()
+    return 0
+
+
+def cache_storage_bytes(cache: Any) -> Optional[int]:
+    """Best-effort actual KV-cache storage bytes for HF and TieredKV caches."""
+    if hasattr(cache, "total_bytes"):
+        return int(cache.total_bytes())
+
+    total = 0
+    found = False
+    for attr in ("key_cache", "value_cache"):
+        tensors = getattr(cache, attr, None)
+        if tensors is None:
+            continue
+        for t in tensors:
+            if torch.is_tensor(t):
+                total += _tensor_storage_bytes(t)
+                found = True
+    if found:
+        return total
+
+    if hasattr(cache, "to_legacy_cache"):
+        try:
+            legacy = cache.to_legacy_cache()
+            for layer in legacy:
+                if isinstance(layer, (tuple, list)):
+                    for t in layer:
+                        total += _tensor_storage_bytes(t)
+                        found = found or torch.is_tensor(t)
+            if found:
+                return total
+        except Exception:
+            return None
+
+    return None
+
+
 @torch.no_grad()
 def measure_memory(
     model,
@@ -373,16 +417,23 @@ def measure_memory(
     device: str = "cuda",
 ) -> MemoryReport:
     """Run one prefill, return empirical + theoretical KV cache sizes."""
-    if device == "cuda":
+    if _is_cuda_device(device):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         baseline = torch.cuda.memory_allocated()
     else:
         baseline = 0
 
-    _ = model(prompt_ids.to(device), past_key_values=cache, use_cache=True)
+    input_ids = prompt_ids.to(device)
+    attention_mask = torch.ones_like(input_ids, device=device)
+    _ = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        past_key_values=cache,
+        use_cache=True,
+    )
 
-    if device == "cuda":
+    if _is_cuda_device(device):
         peak_alloc = torch.cuda.max_memory_allocated()
         peak_reserved = torch.cuda.max_memory_reserved()
     else:
@@ -390,10 +441,9 @@ def measure_memory(
         peak_reserved = 0
 
     seq_len = prompt_ids.shape[1]
-    cache_bytes_empirical = (
-        cache.total_bytes() if hasattr(cache, "total_bytes")
-        else (peak_alloc - baseline)
-    )
+    cache_bytes_empirical = cache_storage_bytes(cache)
+    if cache_bytes_empirical is None:
+        cache_bytes_empirical = peak_alloc - baseline
     cfg = model.config
     num_kv_heads = getattr(cfg, "num_key_value_heads", cfg.num_attention_heads)
     head_dim = cfg.hidden_size // cfg.num_attention_heads
@@ -427,27 +477,31 @@ def measure_throughput(
     # Warmup
     for _ in range(n_warmup):
         cache = cache_factory()
+        input_ids = prompt_ids.to(device)
+        attention_mask = torch.ones_like(input_ids, device=device)
         _ = model.generate(
-            prompt_ids.to(device), past_key_values=cache,
+            input_ids=input_ids, attention_mask=attention_mask, past_key_values=cache,
             max_new_tokens=n_new, do_sample=False, use_cache=True,
             pad_token_id=getattr(model.generation_config, "pad_token_id", 0),
         )
-    if device == "cuda":
+    if _is_cuda_device(device):
         torch.cuda.synchronize()
 
     for _ in range(n_iter):
         cache = cache_factory()
-        if device == "cuda":
+        if _is_cuda_device(device):
             torch.cuda.synchronize()
             t0 = time.perf_counter()
         else:
             t0 = time.perf_counter()
+        input_ids = prompt_ids.to(device)
+        attention_mask = torch.ones_like(input_ids, device=device)
         out = model.generate(
-            prompt_ids.to(device), past_key_values=cache,
+            input_ids=input_ids, attention_mask=attention_mask, past_key_values=cache,
             max_new_tokens=n_new, do_sample=False, use_cache=True,
             pad_token_id=getattr(model.generation_config, "pad_token_id", 0),
         )
-        if device == "cuda":
+        if _is_cuda_device(device):
             torch.cuda.synchronize()
         t1 = time.perf_counter()
         produced = out.shape[1] - prompt_ids.shape[1]

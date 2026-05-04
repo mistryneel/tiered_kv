@@ -1,0 +1,31 @@
+{
+  "name": "random_0119",
+  "tier_bits": [
+    16,
+    8,
+    4,
+    4
+  ],
+  "group_size": 64,
+  "fixed": {
+    "fp16": 256,
+    "int8": 2048,
+    "int4": 3072,
+    "n_sink": 4
+  },
+  "ratio": {
+    "fp16_pct": 0.12,
+    "int8_pct": 0.25,
+    "int4_pct": 0.55,
+    "n_sink": 8,
+    "min_fp16": 96
+  },
+  "hybrid": {
+    "n_sink": 4,
+    "fp16": 96,
+    "geometric": true,
+    "growth": 2.0,
+    "int8": 256,
+    "int4": 3072
+  }
+}

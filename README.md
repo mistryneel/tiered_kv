@@ -15,6 +15,10 @@ study on a single H100 GPU.
 ```
 tiered_kv/
 ├── tiered_kv_cache.ipynb       # the notebook — start here
+├── tiered_kv_local_validation.ipynb
+├── tiered_kv_runpod_h100.ipynb
+├── experiments/                # reusable benchmark runner
+├── autoresearch/               # local autoresearch trial wrapper + agent program
 ├── tiered_kv/                 # helper package, imported from the notebook
 │   ├── quantization.py        # asymmetric uniform quant + bit-packing
 │   ├── policies.py            # FixedWindow / Ratio / Hybrid tier policies
@@ -23,6 +27,40 @@ tiered_kv/
 │   └── viz.py                 # plotting helpers
 ├── requirements.txt
 └── README.md
+```
+
+## Local validation first
+
+For one local RTX 3090, use `tiered_kv_local_validation.ipynb`. It defaults to
+`Qwen/Qwen2.5-3B-Instruct`, `float16`, one visible GPU, shorter context lengths, and the
+same four-way comparison:
+
+1. FP16 `DynamicCache` baseline
+2. `FixedWindow`
+3. `Ratio`
+4. `Hybrid`
+
+The notebook writes machine-readable JSON under `results/local/`.
+
+Equivalent CLI:
+
+```bash
+uv venv --seed --python /usr/bin/python3 --no-managed-python --no-python-downloads .venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+python -m experiments.kv_benchmark --profile local
+```
+
+Quick autoresearch smoke trial:
+
+```bash
+python autoresearch/run_trial.py --profile local --quick
+```
+
+Multi-hour local policy tuning:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python autoresearch/tune_policies.py --profile local --hours 3
 ```
 
 ## What it produces
@@ -58,7 +96,17 @@ Plus ablations across tier policies, group sizes, and the sink-token trick.
    ```bash
    jupyter lab --ip=0.0.0.0 --port=8888 --allow-root --no-browser
    ```
-   Open `tiered_kv_cache.ipynb` and run top to bottom.
+   Open `tiered_kv_runpod_h100.ipynb` and run top to bottom.
+
+   The RunPod notebook loads `autoresearch/best_local_policy_config.json` by default.
+   Override it with:
+   ```bash
+   export POLICY_CONFIG_FILE=/workspace/path/to/policy_config.json
+   ```
+
+For this experiment, prefer one H100 first. Multi-GPU sharding changes memory placement,
+attention execution, and throughput overheads, which makes the KV-cache comparison harder to
+interpret. Add multiple GPUs only after the single-H100 benchmark is stable.
 
 ## Time budget on one H100
 

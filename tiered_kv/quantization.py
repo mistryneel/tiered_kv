@@ -5,10 +5,10 @@ Math (asymmetric, group-wise):
     For a group of values x = (x_1, ..., x_G):
         x_min  = min(x)
         x_max  = max(x)
-        scale  = (x_max - x_min) / (2^b - 1)        # b = bits {2,4,8}
-        zero   = round(-x_min / scale)              # zero-point in [0, 2^b - 1]
-        q_i    = clip(round(x_i / scale) + zero, 0, 2^b - 1)
-        x_hat_i = (q_i - zero) * scale
+        scale   = (x_max - x_min) / (2^b - 1)       # b = bits {2,4,8}
+        offset  = x_min
+        q_i     = clip(round((x_i - offset) / scale), 0, 2^b - 1)
+        x_hat_i = q_i * scale + offset
 
 The 'group' is the slice that shares one (scale, zero) pair. The axis we
 GROUP ALONG is the axis that gets chunked; scales then vary along the OTHER
@@ -26,8 +26,8 @@ channels into the same scale as normal channels, crushing the normals.)
 For real memory savings we pack 2-bit and 4-bit codes into uint8 (8 / b values per byte).
 
 Why asymmetric?  Cached K has channel-wise outliers and is *not* zero-centered, so a
-symmetric range wastes one code at low bit-width. Asymmetric maps the actual data range
-exactly into [0, 2^b - 1], doubling effective resolution at INT2.
+symmetric range wastes codes at low bit-width. Asymmetric maps the actual group range
+exactly into [0, 2^b - 1], which is especially important at INT2.
 
 Why group-wise?  One scale per channel/token preserves resolution where the distribution
 varies. Group size 32 is the canonical sweet-spot from KIVI.
@@ -54,8 +54,9 @@ class QuantTensor:
 
     `codes` holds the integer codes in either uint8 (INT8) or *packed* uint8
     (INT4 = 2 vals/byte, INT2 = 4 vals/byte). `scale` and `zero` are stored
-    in fp16 for memory efficiency; multiply against the dequantized values
-    in compute_dtype.
+    in fp16 for memory efficiency. The `zero` field is the per-group floating
+    offset (the group minimum), kept under its historical name for API
+    compatibility.
 
     Shapes:
       - For per-channel grouping along axis `group_axis` with group size G,
@@ -65,7 +66,7 @@ class QuantTensor:
     """
     codes: torch.Tensor          # uint8 (packed for INT4/INT2)
     scale: torch.Tensor          # fp16, shape (..., n_groups, 1) along group_axis
-    zero: torch.Tensor           # fp16, same shape as scale
+    zero: torch.Tensor           # fp16 offset/min, same shape as scale
     bits: int                    # 2, 4, or 8
     group_size: int              # number of original elements per (scale, zero) group
     orig_shape: torch.Size       # exact original shape, needed to undo padding/reshape
@@ -122,12 +123,11 @@ def quantize(
         raise ValueError(f"x must be float — got {x.dtype}")
 
     if bits == 16:
-        # No-op passthrough: store as-is in fp16. We still wrap in a QuantTensor
-        # so the cache code path is uniform. scale/zero are unused.
-        x_fp16 = x.to(torch.float16)
+        # No-op passthrough. We still wrap in a QuantTensor so the cache code
+        # path is uniform. scale/zero are unused.
         dummy = torch.zeros(1, dtype=torch.float16, device=x.device)
         return QuantTensor(
-            codes=x_fp16,
+            codes=x.contiguous(),
             scale=dummy,
             zero=dummy,
             bits=16,
@@ -145,10 +145,14 @@ def quantize(
     # Pad along group axis to a multiple of group_size.
     x_padded, n_pad = _maybe_pad_for_group(x, group_axis, group_size)
 
+    # Do the range math in fp32 even when model activations are bf16/fp16.
+    # The stored scale/offset remain fp16 for the intended cache footprint.
+    x_work = x_padded.float()
+
     # Reshape so the group axis becomes (n_groups, group_size).
     new_shape = list(x_padded.shape)
     new_shape[group_axis : group_axis + 1] = [-1, group_size]
-    x_grp = x_padded.reshape(new_shape)
+    x_grp = x_work.reshape(new_shape)
 
     # Compute per-group min and max along the new group dimension (group_axis + 1).
     grp_dim = group_axis + 1
@@ -156,12 +160,13 @@ def quantize(
     x_max = x_grp.amax(dim=grp_dim, keepdim=True)
 
     qmax = (1 << bits) - 1
-    # Avoid div-by-zero for constant groups.
-    scale = ((x_max - x_min) / qmax).clamp_min(1e-8)
-    zero = torch.round(-x_min / scale).clamp(0, qmax)
+    # Avoid div-by-zero for constant groups, and keep the value representable
+    # after fp16 scale storage.
+    scale = ((x_max - x_min) / qmax).clamp_min(torch.finfo(torch.float16).tiny)
+    offset = x_min
 
     # Quantize.
-    q = torch.round(x_grp / scale + zero).clamp(0, qmax).to(torch.uint8)
+    q = torch.round((x_grp - offset) / scale).clamp(0, qmax).to(torch.uint8)
 
     # Flatten group dims back, then pack.
     q_flat_shape = list(x_padded.shape)
@@ -180,7 +185,7 @@ def quantize(
     return QuantTensor(
         codes=codes,
         scale=scale.reshape(s_shape).to(torch.float16),
-        zero=zero.reshape(s_shape).to(torch.float16),
+        zero=offset.reshape(s_shape).to(torch.float16),
         bits=bits,
         group_size=group_size,
         orig_shape=orig_shape,
@@ -205,7 +210,9 @@ def dequantize(qt: QuantTensor) -> torch.Tensor:
     new_shape[qt.group_axis : qt.group_axis + 1] = [-1, qt.group_size]
     q_grp = q.reshape(new_shape).to(qt.compute_dtype)
 
-    x_grp = (q_grp - qt.zero.to(qt.compute_dtype)) * qt.scale.to(qt.compute_dtype)
+    scale = qt.scale.to(qt.compute_dtype)
+    offset = qt.zero.to(qt.compute_dtype)
+    x_grp = q_grp * scale + offset
 
     x = x_grp.reshape(*q.shape)
 
